@@ -55,7 +55,11 @@ class Notifier:
                 "there is no notification endpoint  neither in the config file nor the default"
             )
         logging.debug(json.dumps(data, indent=4))
-        response = requests.post(endpoint, json=json.dumps(data, indent=4))
+        response = requests.post(
+            endpoint,
+            data=json.dumps(data),
+            headers={"Content-type": "application/json", "charset": "utf-8"},
+        )
         logging.debug(response.text)
 
     def __get_config(self, case=0):
