@@ -9,7 +9,8 @@ except ImportError:
     # Try backported to PY<37 `importlib_resources`.
     import importlib_resources as pkg_resources
 import os
-from datetime import datetime
+from pathlib import Path
+from datetime import datetime, timedelta
 import json
 import logging
 import requests
@@ -26,7 +27,8 @@ class Notifier:
         and sent the date in the format indicated in
         http://monit-docs.web.cern.ch/monit-docs/alarms/external.html
     """
-
+    __SNOW_LOCK_PATTERN = "/var/lock/cms-notifier/{service_element}_{functional_element}.lock"
+    __SNOW_DAYS_TO_CREATE = 1
     def __init__(self, config=None):
         """
         :param config (optional) a dictionary with the format defined
@@ -35,7 +37,7 @@ class Notifier:
         self._config = json.load(pkg_resources.open_text(templates, "default.json"))
         self._config.update(config or {})
 
-    def send_notification(self, case=0, subject=None, description=None):
+    def send_notification(self, case=0, subject=None, description=None, dry_run=False):
         """
             send a notification to the monit infrastructure given the case
             specified.
@@ -43,8 +45,17 @@ class Notifier:
         _data = {**self.__get_config(case)}
         _data.update({"summary": subject, "description": description})
         _data["timestamp"] = int(datetime.utcnow().timestamp())
+        if "snow" in _data.get("targets",[])\
+           and not self.__should_create_snow_ticket(_data):
+           _data["targets"].remove("snow")
+           _data.pop("snow",None)
+        logging.debug("Dry Run %s", dry_run)
         if "targets" in _data and len(_data["targets"]) > 0:
-            self.__send_message(_data)
+            if not dry_run:
+                self.__send_message(_data)
+            else:
+                
+                print(json.dumps(_data, indent=4))
         else:
             logging.info("no message for exit_%d", case)
 
@@ -77,6 +88,25 @@ class Notifier:
             return a string with the current configuration values
         """
         return json.dumps(self._config, indent=4)
+        
+    def __should_create_snow_ticket(self, data={}):
+        """
+            Limit the creation of snow tickets to one 
+            per __SNOW_DAYS_TO_CREATE days per service_element/functional_element
+        """
+        if not "snow" in data:
+            logging.Warning("There is not snow configuration, but snow is listed as target %s", str(data))
+            return False
+        create = True
+        _path = Path(self.__SNOW_LOCK_PATTERN.format(functional_element=data["snow"].get("functional_element",None), service_element=data["snow"].get("service_element",None)))
+        if _path.is_file():
+            _min_date = datetime.now() - timedelta(days=self.__SNOW_DAYS_TO_CREATE)
+            _dir_time = datetime.fromtimestamp(_path.stat().st_mtime)
+            create = _dir_time < _min_date
+        if create:
+            _path.parent.mkdir(exist_ok=True,parents=True)
+            _path.touch()
+        return create 
 
 
 @click.command()
@@ -93,6 +123,12 @@ class Notifier:
     help="Shows the configuration (combining the defaults and the specified config file) and exits",
 )
 @click.option(
+    "--dry_run",
+    default=False,
+    is_flag=True,
+    help="Print/don't send the message",
+)
+@click.option(
     "--subject",
     default="CMS Notifier message",
     help="Subject/summary of the notification",
@@ -102,7 +138,7 @@ class Notifier:
     default=0,
     help="case to be applied to this notification -defined as exit_{case} in the configuration",
 )
-def main(subject, config_file=None, see_config=False, case=0):
+def main(subject, config_file=None, see_config=False, case=0, dry_run=False):
     """
     The notifier application will send a message to the monit
     infrastructure. It will recieve the message in the standard input,
@@ -115,7 +151,7 @@ def main(subject, config_file=None, see_config=False, case=0):
         _desc = click.get_text_stream("stdin").read()
         logging.debug("description: %s", _desc)
         _desc = _desc.lstrip() or "No message provided"
-        notifier.send_notification(subject=subject, description=_desc, case=case)
+        notifier.send_notification(subject=subject, description=_desc, case=case, dry_run=dry_run)
 
 
 if __name__ == "__main__":
